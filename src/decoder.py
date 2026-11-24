@@ -5,6 +5,7 @@ from dataclasses import dataclass, field
 from typing import Callable, Iterator
 
 from config import FeedConfig
+from loguru import logger
 
 NULL_I64 = -(2**63)
 NULL_U32 = 0xFFFFFFFF
@@ -933,6 +934,16 @@ class CoreL2OrderBook(Adapter):
         for _, _, message, _ in packet.messages():
             validate_core_message(message, PROFILE_ORDER_BOOK)
         if packet.count == 0:
+            logger.debug(
+                "112 heartbeat role={} line={} seq={} synced={} complete={} watermark={} next={}",
+                "incremental" if datagram.role == ROLE_INCREMENTAL else "snapshot",
+                datagram.line,
+                packet.sequence,
+                self.synced,
+                self.complete,
+                self.watermark,
+                self.next,
+            )
             if datagram.role == ROLE_INCREMENTAL:
                 self.saw_heartbeat = True
                 self.heartbeat_seq = packet.sequence
@@ -954,6 +965,11 @@ class CoreL2OrderBook(Adapter):
                     self.invalidate("LME Core L2 realtime sequence reset")
                     self.pending.clear()
                     self.next = message.u32(4)
+                    logger.debug(
+                        "112 realtime sequence reset line={} next={}",
+                        datagram.line,
+                        self.next,
+                    )
                 elif datagram.role == ROLE_SNAPSHOT:
                     if send <= self.refresh_reset_time:
                         continue
@@ -963,6 +979,11 @@ class CoreL2OrderBook(Adapter):
                     self.complete = False
                     self.staged.clear()
                     self.snapshot_events.clear()
+                    logger.debug(
+                        "112 snapshot sequence reset line={} refresh_next={}",
+                        datagram.line,
+                        self.refresh_next,
+                    )
                 else:
                     raise ParseError("invalid LME Core L2 endpoint role")
                 continue
@@ -988,11 +1009,26 @@ class CoreL2OrderBook(Adapter):
                         self.watermark = message.u32(4)
                         self.complete = True
                         self.collecting = False
+                        logger.debug(
+                            "112 refresh cycle complete line={} watermark={} next={} pending={} saw_heartbeat={} heartbeat_seq={} synced={}",
+                            datagram.line,
+                            self.watermark,
+                            self.next,
+                            len(self.pending),
+                            self.saw_heartbeat,
+                            self.heartbeat_seq,
+                            self.synced,
+                        )
                         self.try_complete()
                     elif not self.complete:
                         self.collecting = True
                         self.staged.clear()
                         self.snapshot_events.clear()
+                        logger.debug(
+                            "112 refresh cycle started line={} seq={}",
+                            datagram.line,
+                            seq,
+                        )
                 elif self.collecting and typ == 322:
                     apply_book(message, self._book(self.staged, message.u64(14)), self.config.depth, True)
                 elif self.collecting and typ == 327:

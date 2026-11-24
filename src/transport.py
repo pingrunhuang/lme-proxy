@@ -30,6 +30,19 @@ def dst_ip_from_pktinfo(ancdata: list) -> str | None:
     return None
 
 
+_ROLE_NAMES = {0: "incremental", 1: "snapshot", 2: "definition", 3: "dr"}
+
+
+def _role_name(role: int) -> str:
+    return _ROLE_NAMES.get(role, str(role))
+
+
+def payload_header(payload: bytes) -> str:
+    """Summarize the 16-byte LMEsource UDP header for logs."""
+    if len(payload) < 16:
+        return f"truncated={len(payload)}"
+    pkt_size, msg_count, seq = struct.unpack_from("<HBxI", payload)
+    return f"pkt_size={pkt_size} msg_count={msg_count} seq={seq}"
 
 
 def _ip_to_int(value: str) -> int:
@@ -132,15 +145,38 @@ class MulticastReceiver:
     def _recv_loop(self) -> None:
         packets = 0
         byte_count = 0
+        unmatched = 0
+        missing_pktinfo = 0
+        by_dest: dict[str, int] = defaultdict(int)
         last_log = time.monotonic()
         logged_first = False
+        logged_unmatched = False
+        logger.debug(
+            "multicast receive loop started sockets={} routes={}",
+            len(self._sockets),
+            len(self._routes),
+        )
         while not self._stop.is_set():
             if not self._sockets:
+                logger.warning("multicast receive loop exiting: no sockets")
                 return
             readable, _, _ = select.select(self._sockets, [], [], 0.2)
             now = time.monotonic()
-            if packets and now - last_log >= 10:
-                logger.info("multicast received packets={} bytes={}", packets, byte_count)
+            if now - last_log >= 10:
+                dests = ",".join(f"{ip}:{n}" for ip, n in sorted(by_dest.items())) or "-"
+                logger.info(
+                    "multicast received packets={} bytes={} unmatched={} missing_pktinfo={} dests={}",
+                    packets,
+                    byte_count,
+                    unmatched,
+                    missing_pktinfo,
+                    dests,
+                )
+                packets = 0
+                byte_count = 0
+                unmatched = 0
+                missing_pktinfo = 0
+                by_dest.clear()
                 last_log = now
             for sock in readable:
                 while True:
@@ -153,39 +189,72 @@ class MulticastReceiver:
                     dest = dst_ip_from_pktinfo(ancdata)
                     port = sock.getsockname()[1]
                     source_ip = addr[0]
+                    header = payload_header(payload)
                     if not dest:
+                        missing_pktinfo += 1
                         logger.warning(
-                            "UDP packet from {}:{} on port {} missing IP_PKTINFO dest",
+                            "UDP packet from {}:{} on port {} missing IP_PKTINFO dest bytes={} {}",
                             source_ip,
                             addr[1],
                             port,
+                            len(payload),
+                            header,
                         )
                         continue
                     matched = self._match(dest, port, source_ip)
                     if matched is None:
-                        logger.debug(
-                            "unmatched UDP dest={} from {}:{} port={}",
-                            dest,
-                            source_ip,
-                            addr[1],
-                            port,
-                        )
+                        unmatched += 1
+                        by_dest[f"unmatched:{dest}"] += 1
+                        if not logged_unmatched:
+                            logger.warning(
+                                "unmatched UDP dest={} from {}:{} port={} bytes={} {}",
+                                dest,
+                                source_ip,
+                                addr[1],
+                                port,
+                                len(payload),
+                                header,
+                            )
+                            logged_unmatched = True
+                        else:
+                            logger.debug(
+                                "unmatched UDP dest={} from {}:{} port={} bytes={} {}",
+                                dest,
+                                source_ip,
+                                addr[1],
+                                port,
+                                len(payload),
+                                header,
+                            )
                         continue
                     feed_id, role, line = matched
                     packets += 1
                     byte_count += len(payload)
+                    by_dest[dest] += 1
                     if not logged_first:
                         logger.info(
-                            "first multicast datagram dest={} src={} port={} feed={} role={} line={} bytes={}",
+                            "first multicast datagram dest={} src={} port={} feed={} role={} line={} bytes={} {}",
                             dest,
                             source_ip,
                             port,
                             feed_id,
-                            role,
+                            _role_name(role),
                             line,
                             len(payload),
+                            header,
                         )
                         logged_first = True
+                    logger.debug(
+                        "multicast datagram dest={} src={} port={} feed={} role={} line={} bytes={} {}",
+                        dest,
+                        source_ip,
+                        port,
+                        feed_id,
+                        _role_name(role),
+                        line,
+                        len(payload),
+                        header,
+                    )
                     datagram = Datagram(
                         feed_id=feed_id,
                         role=role,

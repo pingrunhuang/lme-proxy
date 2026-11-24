@@ -1,7 +1,7 @@
 import socket
 import struct
 
-from transport import dst_ip_from_pktinfo, MulticastReceiver
+from transport import dst_ip_from_pktinfo, payload_header, MulticastReceiver
 
 
 def test_dst_ip_from_pktinfo_unpacks_multicast_group() -> None:
@@ -30,3 +30,11 @@ def test_match_selects_route_by_destination_group() -> None:
     assert receiver._match("224.0.241.14", 61000, "213.86.73.139") == (112, 1, 1)
     assert receiver._match("224.0.240.13", 61000, "213.86.73.131") == (112, 0, 0)
     assert receiver._match("224.0.241.15", 61000, "213.86.73.139") is None
+
+
+def test_payload_header_summarizes_lme_udp_header() -> None:
+    payload = struct.pack("<HBxIQ", 16, 0, 42, 0)  # heartbeat: 16 bytes, msg_count=0, seq=42
+    assert payload_header(payload) == "pkt_size=16 msg_count=0 seq=42"
+    assert payload_header(b"short") == "truncated=5"
+
+

@@ -48,7 +48,10 @@ LME 组播是整通道加入，没有按合约的上游订阅。`subscribe_marke
 ```bash
 cp .env.example .env
 # 按需填写 ZMQ 端口、LME_INTERFACE_IP、LME_SYMBOL_MAP、LME_SYMBOLS
+# 排查收包/同步问题时把 LOG_LEVEL 改成 DEBUG
 ```
+
+日志级别由 `.env` 里的 `LOG_LEVEL` 控制（`TRACE` / `DEBUG` / `INFO` / `WARNING` / `ERROR` / `CRITICAL`，默认 `INFO`）。`DEBUG` 会打出每条组播包的目的组、源地址、序号，以及 112 心跳和 612 刷新周期。即便保持 `INFO`，收包循环也会每 10 秒打一次计数（包括 0 包）和按目的组的拆分。
 
 主配置是 `config/lme.yaml`，模板来自 demo 的 `lme-112-612-614-test.yaml`。目的组和 UDP 端口取自 *LME Systems Connectivity Guide v5.4* Production 表，**必须在测试环境用 tcpdump 核对**，不能当作可达证明。
 
@@ -213,6 +216,10 @@ ZeroMQ 没有身份认证。生产环境只用防火墙或私有网络暴露 562
 - 订单录入
 
 价格尺度按 v4.13：Core 行情为定点 `-6`。官方空值不会被改写成价格 0。
+
+## 离线部署（RHEL 9 / 无公网）
+
+目标机如果不能访问公网，也不要使用系统自带的 Python 3.9。请使用配套离线包 `lme_proxy-offline-rhel9-x86_64.tar.gz`（内置可搬迁的 CPython 3.12 与依赖 wheel）。解压后按包内 `README-OFFLINE.md` 执行 `./install.sh` 和 `./run.sh`。不要在目标机上运行 `uv sync`，也不要从 PyPI 安装。
 
 ## 限制
 
