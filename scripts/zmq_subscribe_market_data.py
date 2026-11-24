@@ -5,8 +5,12 @@ Connects to PUB first, then sends ``subscribe_market_data`` on REP using TAP-sty
 symbols (``LME:F:NI:3M``) or raw TradableInstrumentIDs (``42``). Topics are
 ``marketdata.LME.<symbol>``.
 
+By default only book updates (bid/ask) are printed. Use --all-events to also
+include trades and other event kinds.
+
 Example:
   uv run python scripts/zmq_subscribe_market_data.py --symbol 'LME:F:NI:3M' --count 20 --pretty
+  uv run python scripts/zmq_subscribe_market_data.py --symbol 'LME:F:NI:3M' --all-events --count 20
 """
 
 from __future__ import annotations
@@ -89,7 +93,7 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
         "--count",
         type=non_negative_int,
         default=0,
-        help="exit after N matching market-data events; 0 means run until Ctrl+C",
+        help="exit after N printed events; 0 means run until Ctrl+C",
     )
     parser.add_argument(
         "--idle-timeout",
@@ -107,7 +111,21 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
     parser.add_argument(
         "--pretty",
         action="store_true",
-        help="pretty-print multi-line JSON instead of one object per line",
+        help="also print the full JSON payload after the bid/ask summary line",
+    )
+    quotes = parser.add_mutually_exclusive_group()
+    quotes.add_argument(
+        "--quotes-only",
+        dest="quotes_only",
+        action="store_true",
+        default=True,
+        help="only print book updates that carry bid/ask (default)",
+    )
+    quotes.add_argument(
+        "--all-events",
+        dest="quotes_only",
+        action="store_false",
+        help="include trades and other market-data events, not just bid/ask",
     )
     args = parser.parse_args(list(argv) if argv is not None else None)
     if args.symbols is None:
@@ -209,7 +227,38 @@ def symbol_matches(wire: str, requested: Sequence[str]) -> bool:
     return False
 
 
+def event_data(payload: dict[str, Any]) -> dict[str, Any]:
+    data = payload.get("data")
+    return data if isinstance(data, dict) else {}
+
+
+def has_quote(payload: dict[str, Any]) -> bool:
+    data = event_data(payload)
+    if data.get("kind") == "book":
+        return True
+    return data.get("bid_price_1") is not None or data.get("ask_price_1") is not None
+
+
+def format_quote_line(topic: str, payload: dict[str, Any]) -> str:
+    data = event_data(payload)
+    symbol = data.get("symbol") or topic
+    kind = data.get("kind") or "-"
+    last = data.get("last_price")
+    bid = data.get("bid_price_1")
+    bid_vol = data.get("bid_volume_1")
+    ask = data.get("ask_price_1")
+    ask_vol = data.get("ask_volume_1")
+    return (
+        f"{symbol}  {kind}  last={last}  "
+        f"bid={bid} x {bid_vol}  ask={ask} x {ask_vol}"
+    )
+
+
 def log_event(topic: str, payload: dict[str, Any], *, pretty: bool) -> None:
+    if topic.startswith("marketdata."):
+        logger.info("{}", format_quote_line(topic, payload))
+        if not pretty:
+            return
     output = {"topic": topic, **payload}
     indent = 2 if pretty else None
     logger.info(
@@ -266,9 +315,10 @@ def run(args: argparse.Namespace) -> int:
         )
         subscribed = True
         logger.info(
-            "subscribed symbols={} prefix={} response={}",
+            "subscribed symbols={} prefix={} quotes_only={} response={}",
             args.symbols,
             market_prefix,
+            args.quotes_only,
             response["status"],
         )
         poller = zmq.Poller()
@@ -291,6 +341,9 @@ def run(args: argparse.Namespace) -> int:
                 wire = wire_symbol(topic, payload, market_prefix)
                 if not symbol_matches(wire, args.symbols):
                     logger.debug("skip wire={} (does not match {})", wire, args.symbols)
+                    continue
+                if args.quotes_only and not has_quote(payload):
+                    logger.debug("skip wire={} kind={} (no bid/ask)", wire, event_data(payload).get("kind"))
                     continue
                 log_event(topic, payload, pretty=args.pretty)
                 received += 1

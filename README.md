@@ -102,7 +102,7 @@ uv run python scripts/zmq_subscribe_market_data.py \
   --pretty
 ```
 
-不传 `--count` 时一直打印，Ctrl+C 退出并退订。远程 Proxy 用 `--host`、`--pub-port`、`--rep-port`。`--symbol` 也可填原始 `TradableInstrumentID`。
+默认只打印带买一卖一的订单簿更新；要同时看成交等事件，加上 `--all-events`。不传 `--count` 时一直打印，Ctrl+C 退出并退订。远程 Proxy 用 `--host`、`--pub-port`、`--rep-port`。`--symbol` 也可填原始 `TradableInstrumentID`。
 
 ## 测试
 
