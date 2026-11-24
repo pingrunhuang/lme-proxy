@@ -1,0 +1,10 @@
+# TradableInstrumentID -> TAP-style canonical symbol.
+# ExchangeNo:CommodityType:CommodityNo:ContractNo, e.g. LME:F:NI:3M
+#
+# Without a mapping (and without channel 115 instrument definitions, which
+# this proxy does not decode), market-data topics use the numeric
+# TradableInstrumentID as the symbol, for example marketdata.LME.42
+#
+# Replace the placeholder ID after you confirm it on the test feed.
+
+# 123456789: LME:F:NI:3M

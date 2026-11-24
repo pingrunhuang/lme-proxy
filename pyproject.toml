@@ -1,0 +1,24 @@
+[project]
+name = "lme-proxy"
+version = "0.1.0"
+description = "LME LMEsource v4.13 market-data gateway exposed to shenkong clients over ZeroMQ"
+readme = "README.md"
+requires-python = ">=3.12"
+dependencies = [
+    "loguru>=0.7.3",
+    "python-dotenv>=1.0.1",
+    "pyyaml>=6.0.1",
+    "pyzmq>=25.1.0",
+]
+
+[dependency-groups]
+dev = [
+    "pytest>=8.0.0",
+]
+
+[tool.uv]
+package = false
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["src"]

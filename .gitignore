@@ -1,0 +1,19 @@
+.venv/
+.env
+__pycache__/
+*.py[cod]
+*.egg-info/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+logs/
+*.log
+config/local.yaml
+config/local*.yaml
+!config/lme.yaml
+!config/symbols.yaml
+# Captures may contain venue addresses or session data
+pcaps/
+*.pcap
+!tests/data/*.pcap
+.DS_Store

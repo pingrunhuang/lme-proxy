@@ -1,0 +1,73 @@
+# LMEsource v4.13 Core L2 template: 112 realtime, 612 book refresh, 614 trade replay.
+# Destination groups and UDP ports come from LME Systems Connectivity Guide v5.4
+# Production tables in the C++ demo (futures_quote). These are placeholders until
+# the test environment confirms them — do not treat them as a reachability proof.
+#
+# Live join requires network.interface_ip (or LME_INTERFACE_IP) to be the IPv4
+# of the NIC that actually receives these groups. 0.0.0.0 / REPLACE_WITH_* is
+# rejected in live mode. Start with ASM (no source_ip); add source_ip per
+# endpoint after you confirm the sender (SSM).
+#
+# This proxy is market-data only, demo-grade, and is not production-certified.
+# There is no LME RTS/TCP gap fill and no channel 115 instrument definitions.
+
+config_version: 1
+
+network:
+  # Required for live multicast. Override with LME_INTERFACE_IP.
+  interface_ip: REPLACE_WITH_LOCAL_IPV4
+  receive_buffer_bytes: 16777216
+  receive_batch_max: 16
+
+# Optional path; also settable via LME_SYMBOL_MAP.
+# symbol_map: config/symbols.yaml
+
+feeds:
+  - id: 112
+    protocol: lmesource_v4
+    revision: "4.13"
+    # 112 and 612 share one order-book adapter; 612's 203 LastSeqNum is the 112 watermark.
+    channel_id: 112
+    depth: 15
+    max_instruments: 8192
+    recovery_buffer_bytes: 67108864
+    raw_messages: false
+    publish_invalid_books: false
+    endpoints:
+      - {role: incremental, line: A, group: 224.0.240.13, port: 61000}
+      - {role: incremental, line: B, group: 224.0.241.13, port: 61000}
+      - {role: snapshot, line: A, group: 224.0.240.14, port: 61000}
+      - {role: snapshot, line: B, group: 224.0.241.14, port: 61000}
+    # Optional decoder-side filter (TradableInstrumentID). Empty = all instruments.
+    # subscriptions:
+    #   instrument_ids: [123456]
+
+  - id: 614
+    protocol: lmesource_v4
+    revision: "4.13"
+    # Independent trade-replay sequence; emits trades only; does not recover the 112 book.
+    channel_id: 614
+    max_instruments: 8192
+    recovery_buffer_bytes: 32768
+    raw_messages: false
+    endpoints:
+      - {role: snapshot, line: A, group: 224.0.240.18, port: 61000}
+      - {role: snapshot, line: B, group: 224.0.241.18, port: 61000}
+
+  # Optional: old v4.13 LBMA auction reference-price path (307 realtime + 807 refresh).
+  # Not compatible with v4.18+ (405 was removed). Uncomment only if the test feed
+  # still publishes 405. Addresses must be confirmed on site.
+  # - id: 307
+  #   protocol: lmesource_v4
+  #   revision: "4.13"
+  #   channel_id: 307
+  #   max_instruments: 4096
+  #   recovery_buffer_bytes: 16777216
+  #   raw_messages: false
+  #   endpoints:
+  #     - {role: incremental, line: A, group: 224.0.240.119, port: 61000}
+  #     - {role: incremental, line: B, group: 224.0.241.119, port: 61000}
+  #     - {role: snapshot, line: A, group: 224.0.240.120, port: 61000}
+  #     - {role: snapshot, line: B, group: 224.0.241.120, port: 61000}
+  #   subscriptions:
+  #     commodities: [PT, PD]
