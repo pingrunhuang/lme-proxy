@@ -151,6 +151,12 @@ class LmeProxy:
         status = map_status_or_error(event)
         if status is not None:
             topic, name, data = status
+            logger.info(
+                "lme {} topic={}: {}",
+                name,
+                topic,
+                data.get("reason") or data.get("message") or data,
+            )
             self.enqueue_publish(topic, name, data)
             return
         mapped = map_market_data(event, self.resolver, local_time_ms=int(time.time() * 1000))
