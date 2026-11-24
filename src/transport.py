@@ -6,8 +6,13 @@ import select
 import socket
 import struct
 import threading
+import time
+from collections import defaultdict
 from collections.abc import Callable, Iterator
 from typing import Iterable
+
+# Linux-only; the socket module does not always export this name.
+_IP_MULTICAST_ALL = getattr(socket, "IP_MULTICAST_ALL", 49)
 
 from config import Endpoint, FeedFile
 from decoder import FLAG_REPLAYED, Datagram, LmePacketView, ParseError
@@ -15,6 +20,16 @@ from loguru import logger
 
 
 OnDatagram = Callable[[Datagram], None]
+
+def dst_ip_from_pktinfo(ancdata: list) -> str | None:
+    """Return the IPv4 destination (multicast group) from IP_PKTINFO cmsg data."""
+    for level, typ, data in ancdata:
+        if level == socket.IPPROTO_IP and typ == socket.IP_PKTINFO and len(data) >= 12:
+            _ifindex, _spec_dst, dst = struct.unpack_from("=I4s4s", data)
+            return socket.inet_ntoa(dst)
+    return None
+
+
 
 
 def _ip_to_int(value: str) -> int:
@@ -46,19 +61,27 @@ class MulticastReceiver:
 
     def start(self) -> None:
         interface = socket.inet_aton(self._feeds.interface_ip)
+        by_port: dict[int, list[tuple]] = defaultdict(list)
         for feed in self._feeds.feeds:
             for endpoint in feed.endpoints:
-                sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM, socket.IPPROTO_UDP)
-                sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-                try:
-                    sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEPORT, 1)
-                except OSError:
-                    pass
-                sock.setsockopt(socket.SOL_SOCKET, socket.SO_RCVBUF, self._feeds.receive_buffer_bytes)
-                sock.bind(("", endpoint.port))
+                by_port[endpoint.port].append((feed, endpoint))
+
+        for port, items in by_port.items():
+            sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM, socket.IPPROTO_UDP)
+            sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+            sock.setsockopt(socket.SOL_SOCKET, socket.SO_RCVBUF, self._feeds.receive_buffer_bytes)
+            try:
+                sock.setsockopt(socket.IPPROTO_IP, _IP_MULTICAST_ALL, 0)
+            except OSError:
+                pass
+            sock.setsockopt(socket.IPPROTO_IP, socket.IP_PKTINFO, 1)
+            # One socket per UDP port. Binding each group on 61000 with SO_REUSEPORT
+            # lets Linux hash packets across sockets, so a 612 refresh can land on
+            # the 112 socket (or vice versa) and never synchronize the book.
+            sock.bind(("", port))
+            for feed, endpoint in items:
                 group = socket.inet_aton(endpoint.group)
                 if endpoint.source_ip:
-                    # ip_mreq_source: imr_multiaddr, imr_interface, imr_sourceaddr
                     mreq = group + interface + socket.inet_aton(endpoint.source_ip)
                     sock.setsockopt(socket.IPPROTO_IP, socket.IP_ADD_SOURCE_MEMBERSHIP, mreq)
                     mode = "SSM"
@@ -66,8 +89,6 @@ class MulticastReceiver:
                     mreq = group + interface
                     sock.setsockopt(socket.IPPROTO_IP, socket.IP_ADD_MEMBERSHIP, mreq)
                     mode = "ASM"
-                sock.setblocking(False)
-                self._sockets.append(sock)
                 self._routes.append(
                     (
                         _ip_to_int(endpoint.group),
@@ -88,6 +109,8 @@ class MulticastReceiver:
                     endpoint.role_name,
                     self._feeds.interface_ip,
                 )
+            sock.setblocking(False)
+            self._sockets.append(sock)
         self._stop.clear()
         self._thread = threading.Thread(target=self._loop, name="lme-multicast", daemon=True)
         self._thread.start()
@@ -101,28 +124,68 @@ class MulticastReceiver:
         return None
 
     def _loop(self) -> None:
+        try:
+            self._recv_loop()
+        except Exception:
+            logger.exception("multicast receive loop crashed")
+
+    def _recv_loop(self) -> None:
+        packets = 0
+        byte_count = 0
+        last_log = time.monotonic()
+        logged_first = False
         while not self._stop.is_set():
             if not self._sockets:
                 return
             readable, _, _ = select.select(self._sockets, [], [], 0.2)
+            now = time.monotonic()
+            if packets and now - last_log >= 10:
+                logger.info("multicast received packets={} bytes={}", packets, byte_count)
+                last_log = now
             for sock in readable:
-                try:
-                    payload, addr = sock.recvfrom(65536)
-                except OSError:
-                    continue
-                port = sock.getsockname()[1]
-                # Destination group is not on recvfrom; match by bound port + source.
-                # When several groups share a port (LME 61000), try each route for this socket.
-                source_ip = addr[0]
-                matched = False
-                for index, sock2 in enumerate(self._sockets):
-                    if sock2 is not sock:
+                while True:
+                    try:
+                        payload, ancdata, _flags, addr = sock.recvmsg(65536, 256)
+                    except BlockingIOError:
+                        break
+                    except OSError:
+                        break
+                    dest = dst_ip_from_pktinfo(ancdata)
+                    port = sock.getsockname()[1]
+                    source_ip = addr[0]
+                    if not dest:
+                        logger.warning(
+                            "UDP packet from {}:{} on port {} missing IP_PKTINFO dest",
+                            source_ip,
+                            addr[1],
+                            port,
+                        )
                         continue
-                    group, rport, rsrc, feed_id, role, line = self._routes[index]
-                    if rport != port:
+                    matched = self._match(dest, port, source_ip)
+                    if matched is None:
+                        logger.debug(
+                            "unmatched UDP dest={} from {}:{} port={}",
+                            dest,
+                            source_ip,
+                            addr[1],
+                            port,
+                        )
                         continue
-                    if rsrc and rsrc != _ip_to_int(source_ip):
-                        continue
+                    feed_id, role, line = matched
+                    packets += 1
+                    byte_count += len(payload)
+                    if not logged_first:
+                        logger.info(
+                            "first multicast datagram dest={} src={} port={} feed={} role={} line={} bytes={}",
+                            dest,
+                            source_ip,
+                            port,
+                            feed_id,
+                            role,
+                            line,
+                            len(payload),
+                        )
+                        logged_first = True
                     datagram = Datagram(
                         feed_id=feed_id,
                         role=role,
@@ -135,10 +198,6 @@ class MulticastReceiver:
                         self._on_datagram(datagram)
                     except Exception:
                         logger.exception("failed to handle multicast datagram feed={}", feed_id)
-                    matched = True
-                    break
-                if not matched:
-                    logger.debug("unmatched UDP packet from {}:{}", source_ip, addr[1])
 
     def stop(self) -> None:
         self._stop.set()
@@ -154,8 +213,6 @@ class MulticastReceiver:
 
 
 def _now_ns() -> int:
-    import time
-
     return time.time_ns()
 
 
